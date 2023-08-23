@@ -8,7 +8,7 @@
 #include <savvy/reader.hpp>
 #include <shrinkwrap/istream.hpp>
 
-#include "inv_norm.hpp"
+#include "src/inv_norm.hpp"
 
 typedef float signal_t;
 

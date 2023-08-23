@@ -1,16 +1,28 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
 #include <unordered_set>
 #include <limits>
 #include <cmath>
+#include <vector>
+#include <list>
+#include <cstdint>
+#include <string>
 
 #include <savvy/reader.hpp>
 #include <shrinkwrap/istream.hpp>
 
 #include "inv_norm.hpp"
+#include "getopt_wrapper.hpp"
 
 typedef float signal_t;
+enum class method_t { filter, mask, regress };
 
 std::vector<std::string> split_string_to_vector(const std::string& in, char delim)
 {
@@ -28,6 +40,106 @@ std::vector<std::string> split_string_to_vector(const std::string& in, char deli
   return ret;
 }
 
+class vuptool_args : public getopt_wrapper
+{
+private:
+  std::vector<option> long_options_;
+  std::string vcf_path_;
+  std::string methy_path_;
+  std::string manifest_path_;
+  std::string output_path_ = "/dev/stdout";
+  double filter_threhold_ = 0.05;
+  method_t method_ = method_t::regress;
+  bool version_ = false;
+  bool help_ = false;
+public:
+  vuptool_args() :
+    getopt_wrapper("Usage: vuptool [opts ...] methy_table.bed.gz genotypes.{sav,bcf,vcf.gz} epic_array_manifest.tsv.gz",
+      {
+        {"method", "<string>", 'm', "filter, mask, or regress (default: regress)"},
+        {"help", "", 'h', "Print usage"},
+        {"version", "", 'v', "Print version"},
+        {"output", "<file>", 'o', "Output path (default: /dev/stdout)"},
+        {"filter-threshold", "<float>", 'p', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"}
+      })
+  {
+  }
+
+  const std::string& vcf_path() const { return vcf_path_; }
+  const std::string& methy_path() const { return methy_path_; }
+  const std::string& manifest_path() const { return manifest_path_; }
+  const std::string& output_path() const { return output_path_; }
+
+
+  double filter_threshold() const { return filter_threhold_; }
+  method_t method() const { return method_; }
+  bool version_is_set() const { return version_; }
+  bool help_is_set() const { return help_; }
+
+  bool parse(int argc, char** argv)
+  {
+    int long_index = 0;
+    int opt = 0;
+    while ((opt = getopt_long(argc, argv, short_opt_string_.c_str(), long_options_.data(), &long_index )) != -1)
+    {
+      char copt = char(opt & 0xFF);
+      switch (copt)
+      {
+      case 'm':
+        {
+          std::string method_str(optarg ? optarg : "");
+          if (method_str == "regress" || method_str == "r")
+            method_ = method_t::regress;
+          else if (method_str == "mask" || method_str == "m")
+            method_ = method_t::mask;
+          else if (method_str == "filter" || method_str == "f")
+            method_ = method_t::filter;
+          else
+            return std::cerr << "Error: invalid --method\n", false;
+        }
+        break;
+      case 'h':
+        help_ = true;
+        return true;
+      case 'v':
+        version_ = true;
+        return true;
+      case 'o':
+        output_path_ = optarg ? optarg : "";
+        break;
+      case 'p':
+      {
+        filter_threhold_ = std::atof(optarg ? optarg : "");
+        break;
+      }
+      default:
+        return false;
+      }
+    }
+
+    int remaining_arg_count = argc - optind;
+
+    if (remaining_arg_count == 3)
+    {
+      methy_path_ = argv[optind];
+      vcf_path_ = argv[optind + 1];
+      manifest_path_ = argv[optind + 2];
+    }
+    else if (remaining_arg_count < 3)
+    {
+      std::cerr << "Too few arguments\n";
+      return false;
+    }
+    else
+    {
+      std::cerr << "Too many arguments\n";
+      return false;
+    }
+
+    return true;
+  }
+};
+
 class methy_t
 {
 private:
@@ -36,6 +148,8 @@ private:
   std::int64_t pos_end_;
   std::string id_;
   std::vector<signal_t> signals_;
+  std::vector<bool> mask_;
+  std::list<savvy::compressed_vector<std::int8_t>> predictor_list_;
   bool is_reverse_complement_;
 public:
   const std::string& chrom() const { return chrom_; }
@@ -62,7 +176,42 @@ public:
     return 0;
   }
 
-  void mask_signal(std::size_t idx) { signals_[idx] = -std::numeric_limits<signal_t>::infinity(); }
+  void mask_signals()
+  {
+    for (std::size_t i = 0; i < mask_.size(); ++i)
+    {
+      if (mask_[i])
+        signals_[i] = -std::numeric_limits<signal_t>::infinity();
+    }
+  }
+
+  void update_mask(const savvy::compressed_vector<std::int8_t>& gts)
+  {
+    std::size_t stride = gts.size() / signals_.size();
+    for (auto a = gts.begin(); a != gts.end(); ++a)
+    {
+      mask_[a.offset() / stride] = true;
+    }
+  }
+
+  double mask_proportion() const
+  {
+    return double(std::count(mask_.begin(), mask_.end(), true)) / mask_.size();
+  }
+
+  void add_predictor(const savvy::compressed_vector<std::int8_t>& gts)
+  {
+    predictor_list_.push_back(gts);
+  }
+
+  void regress_out_genotypes()
+  {
+    if (predictor_list_.size())
+    {
+
+    }
+    throw std::runtime_error("TODO: " + std::to_string(__LINE__));
+  }
   
   void inv_norm()
   {
@@ -83,6 +232,7 @@ public:
       ret.signals_.reserve(vec.size() - 4);
       for (auto it = vec.begin() + 4; it != vec.end(); ++it)
         ret.signals_.push_back(std::atof(it->c_str()));
+      ret.mask_.resize(ret.signals_.size(), false);
     }
     return ret;
   }
@@ -98,16 +248,38 @@ public:
       else
         ofs << mask_str;
     }
-    ofs.put('\n');
+    return ofs.put('\n').good();
   }
 };
 
 int main(int argc, char** argv)
 {
 
+  vuptool_args args;
+  if (!args.parse(argc, argv))
+  {
+    args.print_usage(std::cerr);
+    return EXIT_FAILURE;
+  }
+
+  if (args.help_is_set())
+  {
+    args.print_usage(std::cout);
+    return EXIT_SUCCESS;
+  }
+
+  if (args.version_is_set())
+  {
+    std::cout << "vuptool v" << VUPTOOL_VERSION << std::endl;
+    return EXIT_SUCCESS;
+  }
+
+
   std::string mask_string = "NA";
   bool inv_norm = false;
   std::int64_t probe_length = 50;
+  method_t method = method_t::mask;
+  double filter_threshold = 0.05;
 
   shrinkwrap::istream methy_file(argv[1]);
   savvy::reader vcf(argv[2]);
@@ -164,19 +336,30 @@ int main(int argc, char** argv)
   {
     while (methy.size() && methy.front().distance(rec, probe_length) > 0)
     {
-      if (inv_norm)
-        methy.front().inv_norm();
-      methy_t::serialize(methy.front(), output_file, mask_string);
+      if (method != method_t::filter || methy.front().mask_proportion() < filter_threshold)
+      {
+        if (method == method_t::regress)
+          methy.front().regress_out_genotypes();
+        else if (method == method_t::mask)
+          methy.front().mask_signals();
+        if (inv_norm)
+          methy.front().inv_norm();
+        methy_t::serialize(methy.front(), output_file, mask_string);
+      }
+
       methy.pop_front();
     }
 
     for (auto it = methy.begin(); it != methy.end() && it->distance(rec, probe_length) == 0; ++it)
     {
       rec.get_format("GT", gts);
-      std::size_t stride = gts.size() / it->signals().size();
-      for (auto a = gts.begin(); a != gts.end(); ++a)
+      if (method == method_t::mask || method == method_t::filter)
       {
-        it->mask_signal(a.offset() / stride);
+        it->update_mask(gts);
+      }
+      else
+      {
+        it->add_predictor(gts);
       }
     }
   }
