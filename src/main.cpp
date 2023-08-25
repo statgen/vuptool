@@ -7,7 +7,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
-#include <unordered_set>
+#include <unordered_map>
 #include <limits>
 #include <cmath>
 #include <vector>
@@ -48,8 +48,10 @@ private:
   std::string methy_path_;
   std::string manifest_path_;
   std::string output_path_ = "/dev/stdout";
+  std::string mask_code_ = "NA";
   double filter_threhold_ = 0.05;
   method_t method_ = method_t::regress;
+  bool inv_norm_ = false;
   bool version_ = false;
   bool help_ = false;
 public:
@@ -60,7 +62,9 @@ public:
         {"help", "", 'h', "Print usage"},
         {"version", "", 'v', "Print version"},
         {"output", "<file>", 'o', "Output path (default: /dev/stdout)"},
-        {"filter-threshold", "<float>", 'p', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"}
+        {"filter-threshold", "<float>", 'p', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"},
+        {"mask-code", "<string>", 'c', "Character sequence used to denote missing/masked values when using --method=mask (default: NA)"},
+        {"inv-norm", "", 'i', "Inverse-normalize output"},
       })
   {
   }
@@ -70,9 +74,10 @@ public:
   const std::string& manifest_path() const { return manifest_path_; }
   const std::string& output_path() const { return output_path_; }
 
-
+  const std::string& mask_code() const { return mask_code_; }
   double filter_threshold() const { return filter_threhold_; }
   method_t method() const { return method_; }
+  bool inv_norm() const { return inv_norm_; }
   bool version_is_set() const { return version_; }
   bool help_is_set() const { return help_; }
 
@@ -85,6 +90,18 @@ public:
       char copt = char(opt & 0xFF);
       switch (copt)
       {
+      case 'h':
+        help_ = true;
+        return true;
+      case 'v':
+        version_ = true;
+        return true;
+      case 'c':
+        mask_code_ = optarg ? optarg : "";
+        break;
+      case 'i':
+        inv_norm_ = true;
+        break;
       case 'm':
         {
           std::string method_str(optarg ? optarg : "");
@@ -98,12 +115,6 @@ public:
             return std::cerr << "Error: invalid --method\n", false;
         }
         break;
-      case 'h':
-        help_ = true;
-        return true;
-      case 'v':
-        version_ = true;
-        return true;
       case 'o':
         output_path_ = optarg ? optarg : "";
         break;
@@ -140,37 +151,44 @@ public:
   }
 };
 
+class manifest_entry
+{
+public:
+  std::string chrom;
+  std::int64_t cpg_beg_0 = 0;
+  short map_flag = 0;
+  short type = 0;
+  manifest_entry() {}
+  manifest_entry(std::string c, std::int64_t p, short m, short t) :
+    chrom(std::move(c)), cpg_beg_0(p), map_flag(m), type(t)
+  {}
+};
+
 class methy_t
 {
 private:
   std::string chrom_;
-  std::int64_t pos_;
-  std::int64_t pos_end_;
+  std::int64_t start_;
+  std::int64_t end_;
   std::string id_;
   std::vector<signal_t> signals_;
+  std::int64_t affected_region_start_;
+  std::int64_t affected_region_end_;
   std::vector<bool> mask_;
   std::list<savvy::compressed_vector<std::int8_t>> predictor_list_;
-  bool is_reverse_complement_;
 public:
   const std::string& chrom() const { return chrom_; }
   const std::vector<signal_t>& signals() const { return signals_; }
+  const std::int64_t start_pos() const { return affected_region_start_; }
+  const std::int64_t end_pos() const { return affected_region_end_; }
 
-  const std::int64_t start_pos(std::int64_t probe_length) const
+  const std::int64_t distance(const savvy::site_info& var, std::size_t alt_idx) const
   {
-    return is_reverse_complement_ ? pos_ : pos_ - probe_length + 2;
-  }
-
-  const std::int64_t end_pos(std::int64_t probe_length) const
-  { 
-    return is_reverse_complement_ ? pos_ + probe_length : pos_ + 2;
-  }  
-
-  const std::int64_t distance(const savvy::site_info& var, std::int64_t probe_length) const
-  {
-    std::int64_t s = start_pos(probe_length);
-    std::int64_t e = end_pos(probe_length);
-    if (var.pos() < s)
-      return var.pos() - s;
+    auto var_length = std::max<std::int64_t>(var.alts()[alt_idx].size(), var.ref().size());
+    std::int64_t s = start_pos();
+    std::int64_t e = end_pos();
+    if (var.pos() + var_length - 1 < s)
+      return (var.pos() + var_length - 1) - s;
     else if (var.pos() > e)
       return var.pos() - e;
     return 0;
@@ -218,17 +236,39 @@ public:
     inverse_normalize(signals_);
   }
 
-  static methy_t deserialize(const std::string& line, const std::unordered_set<std::string>& rev_comp_ids)
+  static methy_t deserialize(const std::string& line, const std::unordered_map<std::string, manifest_entry>& manifest)
   {
     methy_t ret;
     auto vec = split_string_to_vector(line, '\t');
     if (vec.size() >= 5)
     {
       ret.chrom_ = vec[0];
-      ret.pos_ = std::atoll(vec[1].c_str()) + 1;
-      ret.pos_end_ = std::atoll(vec[2].c_str());
+      ret.start_ = std::atoll(vec[1].c_str());
+      ret.end_ = std::atoll(vec[2].c_str());
       ret.id_ = vec[3];
-      ret.is_reverse_complement_ = rev_comp_ids.find(ret.id_) != rev_comp_ids.end();
+      auto res = manifest.find(ret.id_);
+      if (res != manifest.end())
+      {
+        if (res->second.map_flag == 0)
+        {
+          ret.affected_region_end_ = res->second.cpg_beg_0 + 2;
+          ret.affected_region_start_ = ret.affected_region_end_ - 50 + 1; // - 50pb probe + 1 for inclusive end
+          if (res->second.type == 1)
+            ++(ret.affected_region_end_); // add 1 extension base
+          else
+            --(ret.affected_region_start_); // shift 1 for extension base
+        }
+        else
+        {
+          ret.affected_region_start_ = res->second.cpg_beg_0 + 1;
+          ret.affected_region_end_ = ret.affected_region_start_ + 50 - 1; // + 50pb probe - 1 for inclusive end
+          if (res->second.type == 1)
+            --(ret.affected_region_start_); // subtract 1 extension base
+          else
+            ++(ret.affected_region_end_); // shift 1 for extension base
+        }
+      }
+
       ret.signals_.reserve(vec.size() - 4);
       for (auto it = vec.begin() + 4; it != vec.end(); ++it)
         ret.signals_.push_back(std::atof(it->c_str()));
@@ -239,7 +279,7 @@ public:
 
   static bool serialize(const methy_t& m, std::ostream& ofs, const std::string& mask_str)
   {
-    ofs << m.chrom_ << "\t" << (m.pos_ - 1) << "\t" << m.pos_end_ << "\t" << m.id_;
+    ofs << m.chrom_ << "\t" << m.start_ << "\t" << m.end_ << "\t" << m.id_;
     for (auto it = m.signals_.begin(); it != m.signals_.end(); ++it)
     {
       ofs.put('\t');
@@ -251,6 +291,63 @@ public:
     return ofs.put('\n').good();
   }
 };
+
+std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::string& file_path)
+{
+  std::ifstream manifest_file(file_path);
+  std::string line;
+  std::unordered_map<std::string, manifest_entry> manifest;
+  int id_col = -1, chrom_col = -1, cpg_beg_col = -1, map_flag_col = -1, type_col = -1;
+  int min_cols = 5;
+  while (std::getline(manifest_file, line))
+  {
+    auto fields = split_string_to_vector(line, '\t');
+    if (fields.size() < min_cols)
+    {
+      return std::cerr << "Error: malformed EPIC manifest file\n", manifest;
+    }
+    else
+    {
+      if (id_col < 0)
+      {
+        std::unordered_map<std::string, int> col_map;
+        for (std::size_t i = 0; i < fields.size(); ++i)
+          col_map[fields[i]] = i + 1;
+
+        id_col = col_map["Probe_ID"];
+        if (id_col == 0)
+          return std::cerr << "Error: Probe_ID missing from manifest\n", manifest;
+        chrom_col = col_map["CpG_chrm"];
+        if (chrom_col == 0)
+          return std::cerr << "Error: CpG_chrm missing from manifest\n", manifest;
+        cpg_beg_col = col_map["CpG_beg"];
+        if (cpg_beg_col == 0)
+          return std::cerr << "Error: CpG_beg missing from manifest\n", manifest;
+        map_flag_col = col_map["mapFlag_A"];
+        if (map_flag_col == 0)
+          return std::cerr << "Error: mapFlag_A missing from manifest\n", manifest;
+        type_col = col_map["type"];
+        if (type_col == 0)
+          return std::cerr << "Error: type missing from manifest\n", manifest;
+
+        min_cols = std::max(min_cols, id_col);
+        min_cols = std::max(min_cols, chrom_col);
+        min_cols = std::max(min_cols, cpg_beg_col);
+        min_cols = std::max(min_cols, map_flag_col);
+        min_cols = std::max(min_cols, type_col);
+        --id_col; --chrom_col; --cpg_beg_col; --map_flag_col; --type_col;
+      }
+      else
+      {
+        manifest_entry e;
+        e.chrom = fields[chrom_col];
+        e.cpg_beg_0 = std::atoll(fields[cpg_beg_col].c_str());
+      }
+    }
+  }
+
+  return manifest;
+}
 
 int main(int argc, char** argv)
 {
@@ -274,32 +371,17 @@ int main(int argc, char** argv)
     return EXIT_SUCCESS;
   }
 
+  auto manifest = parse_epic_manifest(args.manifest_path());
+  if (manifest.empty())
+    return std::cerr << "Error: failed to parse EPIC array manifest (" << args.manifest_path() << ")\n", EXIT_FAILURE;
 
-  std::string mask_string = "NA";
-  bool inv_norm = false;
-  std::int64_t probe_length = 50;
-  method_t method = method_t::mask;
-  double filter_threshold = 0.05;
-
-  shrinkwrap::istream methy_file(argv[1]);
-  savvy::reader vcf(argv[2]);
-  std::ifstream probe_direction_map(argv[3]);
-  std::ofstream output_file(argc > 4 ? argv[4] : "/dev/stdout", std::ios::binary);
+  shrinkwrap::istream methy_file(args.methy_path());
+  savvy::reader vcf(args.vcf_path());
+  std::ofstream output_file(args.output_path(), std::ios::binary);
 
   std::string line;
-  std::unordered_set<std::string> reverse_complement_ids;
-  while (std::getline(probe_direction_map, line))
-  {
-    std::size_t first_tab = line.find('\t');
-    if (first_tab >= line.size())
-      return std::cerr << "Error: malformed probe direction map file (" << argv[3] << ")\n", EXIT_FAILURE;
-    std::string status = line.substr(first_tab + 1);
-    if (status != "0")
-      reverse_complement_ids.insert(line.substr(0, first_tab));
-  }
-
   if (!std::getline(methy_file, line))
-    return std::cerr << "Error: empty BED file (" << argv[1] << ")\n", EXIT_FAILURE;
+    return std::cerr << "Error: empty BED file (" << args.methy_path() << ")\n", EXIT_FAILURE;
 
   output_file << line << std::endl;
   std::vector<std::string> bed_sample_ids = split_string_to_vector(line, '\t');
@@ -315,14 +397,14 @@ int main(int argc, char** argv)
   std::list<methy_t> methy;
   while (std::getline(methy_file, line))
   {
-    methy.push_back(methy_t::deserialize(line, reverse_complement_ids));
+    methy.push_back(methy_t::deserialize(line, manifest));
     if (methy.back().signals().size() != bed_sample_ids.size())
       return std::cerr << "Error: Invalid number of columns in  BED file\n", EXIT_FAILURE;
   }
 
   savvy::genomic_region reg(methy.front().chrom(), 
-    std::max<std::int64_t>(0, methy.front().start_pos(probe_length)),
-    std::max<std::int64_t>(0, methy.back().end_pos(probe_length)));
+    std::max<std::int64_t>(0, methy.front().start_pos()),
+    std::max<std::int64_t>(0, methy.back().end_pos()));
 
   if (methy.front().chrom() != methy.back().chrom())
     return std::cerr << "Error: multiple chromosomes in a BED file is not yet supported\n", EXIT_FAILURE;
@@ -334,26 +416,29 @@ int main(int argc, char** argv)
   savvy::variant rec;
   while (methy.size() && vcf >> rec)
   {
-    while (methy.size() && methy.front().distance(rec, probe_length) > 0)
+    if (rec.alts().size() != 1)
+      return std::cerr << "Error: all variant records must be biallelic\n", EXIT_FAILURE;
+
+    while (methy.size() && methy.front().distance(rec, 0) > 0)
     {
-      if (method != method_t::filter || methy.front().mask_proportion() < filter_threshold)
+      if (args.method() != method_t::filter || methy.front().mask_proportion() < args.filter_threshold())
       {
-        if (method == method_t::regress)
+        if (args.method() == method_t::regress)
           methy.front().regress_out_genotypes();
-        else if (method == method_t::mask)
+        else if (args.method() == method_t::mask)
           methy.front().mask_signals();
-        if (inv_norm)
+        if (args.inv_norm())
           methy.front().inv_norm();
-        methy_t::serialize(methy.front(), output_file, mask_string);
+        methy_t::serialize(methy.front(), output_file, args.mask_code());
       }
 
       methy.pop_front();
     }
 
-    for (auto it = methy.begin(); it != methy.end() && it->distance(rec, probe_length) == 0; ++it)
+    for (auto it = methy.begin(); it != methy.end() && it->distance(rec, 0) == 0; ++it)
     {
       rec.get_format("GT", gts);
-      if (method == method_t::mask || method == method_t::filter)
+      if (args.method() == method_t::mask || args.method() == method_t::filter)
       {
         it->update_mask(gts);
       }
@@ -366,9 +451,9 @@ int main(int argc, char** argv)
 
   while (methy.size())  
   {
-    if (inv_norm)
+    if (args.inv_norm())
       methy.front().inv_norm();
-    methy_t::serialize(methy.front(), output_file, mask_string);
+    methy_t::serialize(methy.front(), output_file, args.mask_code());
     methy.pop_front();
   }
 
