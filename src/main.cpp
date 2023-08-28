@@ -294,7 +294,7 @@ public:
 
 std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::string& file_path)
 {
-  std::ifstream manifest_file(file_path);
+  shrinkwrap::istream manifest_file(file_path);
   std::string line;
   std::unordered_map<std::string, manifest_entry> manifest;
   int id_col = -1, chrom_col = -1, cpg_beg_col = -1, map_flag_col = -1, type_col = -1;
@@ -342,6 +342,9 @@ std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::s
         manifest_entry e;
         e.chrom = fields[chrom_col];
         e.cpg_beg_0 = std::atoll(fields[cpg_beg_col].c_str());
+        e.map_flag = std::atol(fields[map_flag_col].c_str());
+        e.type = fields[type_col] == "II" ? 2 : 1;
+        manifest.emplace(fields[id_col], std::move(e));
       }
     }
   }
@@ -402,7 +405,7 @@ int main(int argc, char** argv)
       return std::cerr << "Error: Invalid number of columns in  BED file\n", EXIT_FAILURE;
   }
 
-  savvy::genomic_region reg(methy.front().chrom(), 
+  savvy::genomic_region reg(methy.front().chrom(),
     std::max<std::int64_t>(0, methy.front().start_pos()),
     std::max<std::int64_t>(0, methy.back().end_pos()));
 
