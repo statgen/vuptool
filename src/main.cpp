@@ -43,7 +43,6 @@ std::vector<std::string> split_string_to_vector(const std::string& in, char deli
 class vuptool_args : public getopt_wrapper
 {
 private:
-  std::vector<option> long_options_;
   std::string vcf_path_;
   std::string methy_path_;
   std::string manifest_path_;
