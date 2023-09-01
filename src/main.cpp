@@ -21,6 +21,10 @@
 #include "inv_norm.hpp"
 #include "getopt_wrapper.hpp"
 
+#include <xtensor/xtensor.hpp>
+#include <xtensor/xadapt.hpp>
+#include <xtensor-blas/xlinalg.hpp>
+
 typedef float signal_t;
 enum class method_t { filter, mask, regress };
 
@@ -218,16 +222,34 @@ public:
 
   void add_predictor(const savvy::compressed_vector<std::int8_t>& gts)
   {
+    assert(gts.size() == signals_.size());
     predictor_list_.push_back(gts);
   }
 
   void regress_out_genotypes()
   {
+    using namespace xt;
+    using namespace xt::linalg;
+
     if (predictor_list_.size())
     {
+      auto y = xt::adapt(signals_, {signals_.size()});
+      xtensor<double, 2> x = zeros<double>({predictor_list_.size() + 1, predictor_list_.front().size()});
+      auto it = predictor_list_.begin();
+      for (std::size_t i = 0; i < predictor_list_.size(); ++i,++it)
+      {
+        assert(it->size() == x.shape(1));
+        for (auto jt = it->begin(); jt != it->end(); ++jt)
+        {
+          x(i, jt.offset()) = *jt;
+        }
+      }
+      xt::row(x, predictor_list_.size()) = xt::ones<double>({x.shape(1)});
 
+      auto pbetas = dot(dot(pinv(dot(x, transpose(x))), x), y);
+      y -= dot(transpose(x), pbetas);
     }
-    throw std::runtime_error("TODO: " + std::to_string(__LINE__));
+
   }
   
   void inv_norm()
@@ -368,6 +390,19 @@ void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args
 int main(int argc, char** argv)
 {
 
+  using namespace xt;
+  using namespace xt::linalg;
+  xtensor<double, 1> y = {0.2, 0.8, 0.9, 0.85};
+  xtensor<double, 2> X = {
+    {1., 0.1, 0.3, 0.2, 0.002, 0.15},
+    {1., 0.7, 0.7, 0.5, 0.77, 0.59},
+    {1., 0.5, 0.72, 0.6, 0.71, 0.7},
+    {1., 0.9, 0.71, 0.66, 0.68, 0.8}
+  };
+  double lambda = 1.;
+  auto I = diag(ones<double>({X.shape(1)}));
+  xtensor<double, 1> beta = dot(pinv(dot(transpose(X), X) + lambda * I), dot(transpose(X), y));
+
   vuptool_args args;
   if (!args.parse(argc, argv))
   {
@@ -455,6 +490,7 @@ int main(int argc, char** argv)
       }
       else
       {
+        savvy::stride_reduce(gts, gts.size() / vcf.samples().size());
         it->add_predictor(gts);
       }
     }
