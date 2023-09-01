@@ -351,6 +351,20 @@ std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::s
   return manifest;
 }
 
+void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args)
+{
+  if (args.method() != method_t::filter || m.mask_proportion() < args.filter_threshold())
+  {
+    if (args.method() == method_t::regress)
+      m.regress_out_genotypes();
+    else if (args.method() == method_t::mask)
+      m.mask_signals();
+    if (args.inv_norm())
+      m.inv_norm();
+    methy_t::serialize(m, output_file, args.mask_code());
+  }
+}
+
 int main(int argc, char** argv)
 {
 
@@ -375,15 +389,18 @@ int main(int argc, char** argv)
 
   auto manifest = parse_epic_manifest(args.manifest_path());
   if (manifest.empty())
-    return std::cerr << "Error: failed to parse EPIC array manifest (" << args.manifest_path() << ")\n", EXIT_FAILURE;
+    return std::cerr << "Error: failed to parse EPIC array manifest\n", EXIT_FAILURE;
 
   shrinkwrap::istream methy_file(args.methy_path());
+
   savvy::reader vcf(args.vcf_path());
+  if (!vcf)
+    return std::cerr << "Error: failed to open VCF file\n", EXIT_FAILURE;
   std::ofstream output_file(args.output_path(), std::ios::binary);
 
   std::string line;
   if (!std::getline(methy_file, line))
-    return std::cerr << "Error: empty BED file (" << args.methy_path() << ")\n", EXIT_FAILURE;
+    return std::cerr << "Error: empty BED file\n", EXIT_FAILURE;
 
   output_file << line << std::endl;
   std::vector<std::string> bed_sample_ids = split_string_to_vector(line, '\t');
@@ -412,6 +429,8 @@ int main(int argc, char** argv)
     return std::cerr << "Error: multiple chromosomes in a BED file is not yet supported\n", EXIT_FAILURE;
 
   vcf.reset_bounds(reg);
+  if (!vcf)
+    return std::cerr << "Error: could not seek to region " << reg.chromosome() << ":" << reg.from() << "-"  << reg.to() << " in VCF\n", EXIT_FAILURE;
 
   
   savvy::compressed_vector<std::int8_t> gts;
@@ -423,17 +442,7 @@ int main(int argc, char** argv)
 
     while (methy.size() && methy.front().distance(rec, 0) > 0)
     {
-      if (args.method() != method_t::filter || methy.front().mask_proportion() < args.filter_threshold())
-      {
-        if (args.method() == method_t::regress)
-          methy.front().regress_out_genotypes();
-        else if (args.method() == method_t::mask)
-          methy.front().mask_signals();
-        if (args.inv_norm())
-          methy.front().inv_norm();
-        methy_t::serialize(methy.front(), output_file, args.mask_code());
-      }
-
+      write_methy(methy.front(), output_file, args);
       methy.pop_front();
     }
 
@@ -453,11 +462,9 @@ int main(int argc, char** argv)
 
   while (methy.size())  
   {
-    if (args.inv_norm())
-      methy.front().inv_norm();
-    methy_t::serialize(methy.front(), output_file, args.mask_code());
+    write_methy(methy.front(), output_file, args);
     methy.pop_front();
   }
 
-  return EXIT_SUCCESS;
+  return output_file.good() && !vcf.bad() ? EXIT_SUCCESS : EXIT_FAILURE;
 }
