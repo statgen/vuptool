@@ -226,7 +226,7 @@ public:
     predictor_list_.push_back(gts);
   }
 
-  void regress_out_genotypes()
+  void regress_out_genotypes_additive()
   {
     using namespace xt;
     using namespace xt::linalg;
@@ -245,6 +245,32 @@ public:
         }
       }
       xt::row(x, predictor_list_.size()) = xt::ones<double>({x.shape(1)});
+
+      auto pbetas = dot(dot(pinv(dot(x, transpose(x))), x), y);
+      y -= dot(transpose(x), pbetas);
+    }
+
+  }
+
+  void regress_out_genotypes()
+  {
+    using namespace xt;
+    using namespace xt::linalg;
+
+    if (predictor_list_.size())
+    {
+      auto y = xt::adapt(signals_, {signals_.size()});
+      xtensor<double, 2> x = zeros<double>({predictor_list_.size() * 2 + 1, predictor_list_.front().size()});
+      auto it = predictor_list_.begin();
+      for (std::size_t i = 0; i < predictor_list_.size(); ++i,++it)
+      {
+        assert(it->size() == x.shape(1));
+        for (auto jt = it->begin(); jt != it->end(); ++jt)
+        {
+          x(i * 2 + int(*jt == 2), jt.offset()) = 1;
+        }
+      }
+      xt::row(x, predictor_list_.size() * 2) = xt::ones<double>({x.shape(1)});
 
       auto pbetas = dot(dot(pinv(dot(x, transpose(x))), x), y);
       y -= dot(transpose(x), pbetas);
@@ -490,7 +516,10 @@ int main(int argc, char** argv)
       }
       else
       {
-        savvy::stride_reduce(gts, gts.size() / vcf.samples().size());
+        auto stride = gts.size() / vcf.samples().size();
+        if (stride > 2)
+          return std::cerr << "Error: ploidy greater than 2 is currently not supported with regress method.\n", EXIT_FAILURE;
+        savvy::stride_reduce(gts, stride);
         it->add_predictor(gts);
       }
     }
