@@ -167,6 +167,11 @@ public:
   {}
 };
 
+std::int64_t variant_end_pos(const savvy::site_info& var, std::size_t alt_idx)
+{
+  return var.pos() + std::max<std::int64_t>(var.alts()[alt_idx].size(), var.ref().size()) - 1;
+}
+
 class methy_t
 {
 private:
@@ -181,6 +186,7 @@ private:
   std::list<savvy::compressed_vector<std::int8_t>> predictor_list_;
 public:
   const std::string& chrom() const { return chrom_; }
+  std::int64_t sort_pos_1based() const { return start_ + 1; }
   const std::vector<signal_t>& signals() const { return signals_; }
   const std::int64_t start_pos() const { return affected_region_start_; }
   const std::int64_t end_pos() const { return affected_region_end_; }
@@ -507,20 +513,29 @@ int main(int argc, char** argv)
       methy.pop_front();
     }
 
-    for (auto it = methy.begin(); it != methy.end() && it->distance(rec, 0) == 0; ++it)
+    bool gts_extracted = false;
+    for (auto it = methy.begin(); it != methy.end() && (it->sort_pos_1based() - variant_end_pos(rec, 0)) <= 50; ++it)
     {
-      rec.get_format("GT", gts);
-      if (args.method() == method_t::mask || args.method() == method_t::filter)
+      if (it->distance(rec, 0) == 0)
       {
-        it->update_mask(gts);
-      }
-      else
-      {
-        auto stride = gts.size() / vcf.samples().size();
-        if (stride > 2)
-          return std::cerr << "Error: ploidy greater than 2 is currently not supported with regress method.\n", EXIT_FAILURE;
-        savvy::stride_reduce(gts, stride);
-        it->add_predictor(gts);
+        if (!gts_extracted)
+        {
+          rec.get_format("GT", gts);
+          gts_extracted = true;
+        }
+
+        if (args.method() == method_t::mask || args.method() == method_t::filter)
+        {
+          it->update_mask(gts);
+        }
+        else
+        {
+          auto stride = gts.size() / vcf.samples().size();
+          if (stride > 2)
+            return std::cerr << "Error: ploidy greater than 2 is currently not supported with regress method.\n", EXIT_FAILURE;
+          savvy::stride_reduce(gts, stride);
+          it->add_predictor(gts);
+        }
       }
     }
   }
