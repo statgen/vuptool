@@ -51,8 +51,9 @@ private:
   std::string methy_path_;
   std::string manifest_path_;
   std::string output_path_ = "/dev/stdout";
+  std::string mim_output_path_;
   std::string mask_code_ = "NA";
-  double filter_threhold_ = 0.05;
+  double filter_threshold_ = 1.;
   method_t method_ = method_t::regress;
   bool inv_norm_ = false;
   bool version_ = false;
@@ -65,7 +66,8 @@ public:
         {"help", "", 'h', "Print usage"},
         {"version", "", 'v', "Print version"},
         {"output", "<file>", 'o', "Output path (default: /dev/stdout)"},
-        {"filter-threshold", "<float>", 'p', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"},
+        {"mim-output", "<file>", 'p', "Output path for missing indicator method covariates"},
+        {"filter-threshold", "<float>", 'f', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"},
         {"mask-code", "<string>", 'c', "Character sequence used to denote missing/masked values when using --method=mask (default: NA)"},
         {"inv-norm", "", 'i', "Inverse-normalize output"},
       })
@@ -76,9 +78,10 @@ public:
   const std::string& methy_path() const { return methy_path_; }
   const std::string& manifest_path() const { return manifest_path_; }
   const std::string& output_path() const { return output_path_; }
+  const std::string& mim_output_path() const { return mim_output_path_; }
 
   const std::string& mask_code() const { return mask_code_; }
-  double filter_threshold() const { return filter_threhold_; }
+  double filter_threshold() const { return filter_threshold_; }
   method_t method() const { return method_; }
   bool inv_norm() const { return inv_norm_; }
   bool version_is_set() const { return version_; }
@@ -122,8 +125,11 @@ public:
         output_path_ = optarg ? optarg : "";
         break;
       case 'p':
+        mim_output_path_ = optarg ? optarg : "";
+        break;
+      case 'f':
       {
-        filter_threhold_ = std::atof(optarg ? optarg : "");
+        filter_threshold_ = std::atof(optarg ? optarg : "");
         break;
       }
       default:
@@ -230,6 +236,65 @@ public:
   {
     assert(gts.size() == signals_.size());
     predictor_list_.push_back(gts);
+  }
+
+  void write_predictors(std::ostream& ofs)
+  {
+    for (auto it = predictor_list_.begin(); it != predictor_list_.end(); ++it)
+    {
+      std::size_t i = 0;
+      ofs << id_;
+      for (auto jt = it->begin(); jt != it->end(); ++jt,++i)
+      {
+        while (i < jt.offset())
+        {
+          ofs.put('\t');
+          ofs.put('0');
+          ++i;
+        }
+
+        ofs.put('\t');
+        if (*jt == 1)
+          ofs.put('1');
+        else
+          ofs.put('0');
+      }
+
+      while (i < it->size())
+      {
+        ofs.put('\t');
+        ofs.put('0');
+        ++i;
+      }
+      ofs.put('\n');
+
+      i = 0;
+      ofs << id_;
+      for (auto jt = it->begin(); jt != it->end(); ++jt,++i)
+      {
+        while (i < jt.offset())
+        {
+          ofs.put('\t');
+          ofs.put('0');
+          ++i;
+        }
+
+        ofs.put('\t');
+        if (*jt == 2)
+          ofs.put('1');
+        else
+          ofs.put('0');
+      }
+
+      while (i < it->size())
+      {
+        ofs.put('\t');
+        ofs.put('0');
+        ++i;
+      }
+
+      ofs.put('\n');
+    }
   }
 
   void regress_out_genotypes_additive()
@@ -405,9 +470,9 @@ std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::s
   return manifest;
 }
 
-void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args)
+void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args, std::ostream* output_covariates)
 {
-  if (args.method() != method_t::filter || m.mask_proportion() < args.filter_threshold())
+  if (m.mask_proportion() <= args.filter_threshold())
   {
     if (args.method() == method_t::regress)
       m.regress_out_genotypes();
@@ -415,6 +480,8 @@ void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args
       m.mask_signals();
     if (args.inv_norm())
       m.inv_norm();
+    if (output_covariates)
+      m.write_predictors(*output_covariates);
     methy_t::serialize(m, output_file, args.mask_code());
   }
 }
@@ -480,6 +547,19 @@ int main(int argc, char** argv)
   if (vcf_sample_ids != bed_sample_ids)
     return std::cerr << "Error: all sample IDs in BED file must exist in VCF file and in the same order\n", EXIT_FAILURE;
 
+  std::unique_ptr<shrinkwrap::bgzf::ostream> cov_output = nullptr;
+  if (args.mim_output_path().size())
+  {
+    cov_output.reset(new shrinkwrap::bgzf::ostream(args.mim_output_path()));
+    *cov_output << "probe_id";
+    for (auto it = bed_sample_ids.begin(); it != bed_sample_ids.end(); ++it)
+    {
+      cov_output->put('\t');
+      *cov_output << *it;
+    }
+    cov_output->put('\n');
+  }
+
   std::list<methy_t> methy;
   while (std::getline(methy_file, line))
   {
@@ -509,7 +589,7 @@ int main(int argc, char** argv)
 
     while (methy.size() && methy.front().distance(rec, 0) > 0)
     {
-      write_methy(methy.front(), output_file, args);
+      write_methy(methy.front(), output_file, args, cov_output.get());
       methy.pop_front();
     }
 
@@ -524,11 +604,12 @@ int main(int argc, char** argv)
           gts_extracted = true;
         }
 
-        if (args.method() == method_t::mask || args.method() == method_t::filter)
+        if (args.method() == method_t::mask || args.filter_threshold() < 1.)
         {
           it->update_mask(gts);
         }
-        else
+
+        if (args.method() == method_t::regress || args.mim_output_path().size())
         {
           auto stride = gts.size() / vcf.samples().size();
           if (stride > 2)
@@ -542,7 +623,7 @@ int main(int argc, char** argv)
 
   while (methy.size())  
   {
-    write_methy(methy.front(), output_file, args);
+    write_methy(methy.front(), output_file, args, cov_output.get());
     methy.pop_front();
   }
 
