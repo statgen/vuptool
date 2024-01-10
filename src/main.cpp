@@ -67,7 +67,7 @@ public:
         {"version", "", 'v', "Print version"},
         {"output", "<file>", 'o', "Output path (default: /dev/stdout)"},
         {"mim-output", "<file>", 'p', "Output path for missing indicator method covariates"},
-        {"filter-threshold", "<float>", 'f', "Probes will be excluded when proportion of samples with variation under the probe >= this value (--method=filter only; default: 0.05)"},
+        {"filter-threshold", "<float>", 'f', "Probes will be excluded when proportion of samples with variation under the probe > this value (required when --method=filter; default: 1)"},
         {"mask-code", "<string>", 'c', "Character sequence used to denote missing/masked values when using --method=mask (default: NA)"},
         {"inv-norm", "", 'i', "Inverse-normalize output"},
       })
@@ -89,6 +89,7 @@ public:
 
   bool parse(int argc, char** argv)
   {
+    bool filter_threshold_set = false;
     int long_index = 0;
     int opt = 0;
     while ((opt = getopt_long(argc, argv, short_opt_string_.c_str(), long_options_.data(), &long_index )) != -1)
@@ -128,14 +129,16 @@ public:
         mim_output_path_ = optarg ? optarg : "";
         break;
       case 'f':
-      {
         filter_threshold_ = std::atof(optarg ? optarg : "");
+        filter_threshold_set = true;
         break;
-      }
       default:
         return false;
       }
     }
+
+    if (method_ == method_t::filter && !filter_threshold_set)
+      return std::cerr << "--filter-threshold must be specified with --method=filter\n", false;
 
     int remaining_arg_count = argc - optind;
 
