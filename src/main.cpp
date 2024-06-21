@@ -47,6 +47,7 @@ std::vector<std::string> split_string_to_vector(const std::string& in, char deli
 class vuptool_args : public getopt_wrapper
 {
 private:
+  std::vector<std::string> chromosomes_;
   std::string vcf_path_;
   std::string methy_path_;
   std::string manifest_path_;
@@ -56,6 +57,7 @@ private:
   double filter_threshold_ = 1.;
   method_t method_ = method_t::regress;
   bool inv_norm_ = false;
+  bool allow_hets_ = false;
   bool version_ = false;
   bool help_ = false;
 public:
@@ -68,12 +70,15 @@ public:
         {"output", "<file>", 'o', "Output path (default: /dev/stdout)"},
         {"mim-output", "<file>", 'p', "Output path for missing indicator method covariates"},
         {"filter-threshold", "<float>", 'f', "Probes will be excluded when proportion of samples with variation under the probe > this value (required when --method=filter; default: 1)"},
+        {"chromosome", "<string>", 'C', "Comma-separated list of chromosomes to process"},
         {"mask-code", "<string>", 'c', "Character sequence used to denote missing/masked values when using --method=mask (default: NA)"},
         {"inv-norm", "", 'i', "Inverse-normalize output"},
+        {"allow-hets", "", 'a', "Do not mask if variant is only under the binding sequence and only one of the genotype alleles is non-reference"},
       })
   {
   }
 
+  const std::vector<std::string>& chromosomes() const { return chromosomes_; }
   const std::string& vcf_path() const { return vcf_path_; }
   const std::string& methy_path() const { return methy_path_; }
   const std::string& manifest_path() const { return manifest_path_; }
@@ -84,6 +89,7 @@ public:
   double filter_threshold() const { return filter_threshold_; }
   method_t method() const { return method_; }
   bool inv_norm() const { return inv_norm_; }
+  bool allow_hets() const { return allow_hets_; }
   bool version_is_set() const { return version_; }
   bool help_is_set() const { return help_; }
 
@@ -103,9 +109,18 @@ public:
       case 'v':
         version_ = true;
         return true;
+      case 'a':
+        allow_hets_ = true;
+        break;
       case 'c':
         mask_code_ = optarg ? optarg : "";
         break;
+      case 'C':
+        {
+          auto tmp = split_string_to_vector(optarg ? optarg : "", ',');
+          chromosomes_.insert(chromosomes_.end(), tmp.begin(), tmp.end());
+          break;
+        }
       case 'i':
         inv_norm_ = true;
         break;
@@ -413,6 +428,149 @@ public:
   }
 };
 
+class manifest_file
+{
+private:
+  shrinkwrap::istream fs_;
+  std::string line_;
+  int id_col_ = -1;
+  int chrom_col_ = -1;
+  int cpg_beg_col_ = -1;
+  int map_flag_col_ = -1;
+  int type_col_ = -1;
+  int min_cols_ = 5;
+public:
+  class entry
+  {
+  public:
+    std::string chrom;
+    std::string probe_id;
+    std::int64_t cpg_beg_0 = 0;
+    short map_flag = 0;
+    short type = 0;
+    entry() {}
+    entry(std::string c, std::int64_t p, short m, short t) :
+      chrom(std::move(c)), cpg_beg_0(p), map_flag(m), type(t)
+    {}
+
+    bool is_reverse() const { return map_flag == 16; }
+
+    std::int64_t extension_base() const
+    {
+      if (type == 1)
+      {
+        if (is_reverse())
+          return cpg_beg_0 + 3;
+        else
+          return cpg_beg_0;
+      }
+      else
+      {
+        if (is_reverse())
+          return cpg_beg_0 + 2;
+        else
+          return cpg_beg_0 + 1;
+      }
+    }
+
+    std::int64_t cytosine_base() const
+    {
+      if (type == 1)
+      {
+        if (is_reverse())
+          return cpg_beg_0 + 2;
+        else
+          return cpg_beg_0 + 1;
+      }
+      else
+      {
+        if (is_reverse())
+          return cpg_beg_0 + 2;
+        else
+          return cpg_beg_0 + 1;
+      }
+    }
+
+    std::pair<std::int64_t, std::int64_t> binding_range() const
+    {
+      std::int64_t ext_base = extension_base();
+      if (is_reverse())
+        return {ext_base - 50, ext_base - 1};
+      return {ext_base + 1, ext_base + 50};
+    }
+
+    std::pair<std::int64_t, std::int64_t> full_range() const
+    {
+      std::int64_t ext_base = extension_base();
+      if (is_reverse())
+        return {ext_base - 50, ext_base};
+      return {ext_base, ext_base + 50};
+    }
+  };
+
+  manifest_file(const std::string& file_path) :
+    fs_(file_path)
+  {
+    if (std::getline(fs_, line_))
+    {
+      auto fields = split_string_to_vector(line_, '\t');
+
+      std::unordered_map<std::string, int> col_map;
+      for (std::size_t i = 0; i < fields.size(); ++i)
+        col_map[fields[i]] = i + 1;
+
+      id_col_ = col_map["Probe_ID"];
+      if (id_col_ == 0)
+        std::cerr << "Error: Probe_ID missing from manifest\n";
+      chrom_col_ = col_map["CpG_chrm"];
+      if (chrom_col_ == 0)
+        std::cerr << "Error: CpG_chrm missing from manifest\n";
+      cpg_beg_col_ = col_map["CpG_beg"];
+      if (cpg_beg_col_ == 0)
+        std::cerr << "Error: CpG_beg missing from manifest\n";
+      map_flag_col_ = col_map["mapFlag_A"];
+      if (map_flag_col_ == 0)
+        std::cerr << "Error: mapFlag_A missing from manifest\n";
+      type_col_ = col_map["type"];
+      if (type_col_ == 0)
+        std::cerr << "Error: type missing from manifest\n";
+
+      if (id_col_ == 0 || chrom_col_ == 0 || cpg_beg_col_ == 0 || map_flag_col_ == 0 || type_col_ == 0)
+        fs_.setstate(fs_.rdstate() | std::ios::badbit);
+
+      min_cols_ = std::max(min_cols_, id_col_);
+      min_cols_ = std::max(min_cols_, chrom_col_);
+      min_cols_ = std::max(min_cols_, cpg_beg_col_);
+      min_cols_ = std::max(min_cols_, map_flag_col_);
+      min_cols_ = std::max(min_cols_, type_col_);
+      --id_col_; --chrom_col_; --cpg_beg_col_; --map_flag_col_; --type_col_;
+    }
+  }
+
+  bool good() const
+  {
+    return fs_.good();
+  }
+
+  bool read_entry(manifest_file::entry& e)
+  {
+    if (std::getline(fs_, line_))
+    {
+      auto fields = split_string_to_vector(line_, '\t');
+      if (fields.size() < min_cols_)
+        return std::cerr << "Error: malformed EPIC manifest file\n", false;
+
+      e.probe_id = fields[id_col_];
+      e.chrom = fields[chrom_col_];
+      e.cpg_beg_0 = std::atoll(fields[cpg_beg_col_].c_str());
+      e.map_flag = std::atol(fields[map_flag_col_].c_str());
+      e.type = fields[type_col_] == "II" ? 2 : 1;
+      return true;
+    }
+    return false;
+  }
+};
+
 std::unordered_map<std::string, manifest_entry> parse_epic_manifest(const std::string& file_path)
 {
   shrinkwrap::istream manifest_file(file_path);
@@ -489,6 +647,37 @@ void write_methy(methy_t& m, std::ostream& output_file, const vuptool_args& args
   }
 }
 
+std::ostream& write_mask_line(std::ostream& ofs, std::string& buffer, const std::string& probe_id, std::vector<std::size_t>& mask)
+{
+  buffer = probe_id;
+  buffer.reserve(probe_id.size() + mask.size() * 2);
+  for (auto it = mask.begin(); it != mask.end(); ++it)
+  {
+    buffer += '\t';
+    buffer += (*it > 1 ? '1' : '0');
+  }
+
+  buffer += '\n';
+
+  return ofs.write(buffer.data(), buffer.size());
+}
+
+bool overlap(savvy::site_info& var, std::size_t alt_idx, std::int64_t target_pos)
+{
+  auto var_length = std::max<std::int64_t>(var.alts()[alt_idx].size(), var.ref().size());
+  if (var.pos() <= target_pos && (var.pos() + var_length - 1) >= target_pos)
+    return true;
+  return false;
+}
+
+bool overlap(savvy::site_info& var, std::size_t alt_idx, const std::pair<std::int64_t, std::int64_t>& target_range)
+{
+  auto var_length = std::max<std::int64_t>(var.alts()[alt_idx].size(), var.ref().size());
+  if (var.pos() <= target_range.second && (var.pos() + var_length - 1) >= target_range.first)
+    return true;
+  return false;
+}
+
 int main(int argc, char** argv)
 {
 
@@ -524,6 +713,104 @@ int main(int argc, char** argv)
     return EXIT_SUCCESS;
   }
 
+#ifndef VUPTOOL_OLD
+  savvy::reader vcf(args.vcf_path());
+  if (!vcf)
+    return std::cerr << "Error: failed to open VCF file\n", EXIT_FAILURE;
+
+  std::ofstream output_file(args.output_path(), std::ios::binary);
+  if (!output_file)
+    return std::cerr << "Error: failed to open output file\n", EXIT_FAILURE;
+
+  std::set<std::string> chroms_to_process(args.chromosomes().begin(), args.chromosomes().end());
+
+  manifest_file manifest(args.manifest_path());
+  if (!manifest.good())
+    return std::cerr << "Error: failed to open manifest file\n", EXIT_FAILURE;
+
+  std::size_t n_samples = vcf.samples().size();
+  if (n_samples == 0)
+    return std::cerr << "Error: no samples in VCF file\n", EXIT_FAILURE;
+
+  output_file << "probe_id";
+  for (auto it = vcf.samples().begin(); it != vcf.samples().end(); ++it)
+  {
+    output_file.put('\t');
+    output_file << *it;
+  }
+  output_file << std::endl;
+
+  std::vector<std::size_t> mask(n_samples);
+  std::string buffer;
+  savvy::compressed_vector<std::int8_t> geno;
+  savvy::variant var;
+  manifest_file::entry entry;
+  while (manifest.read_entry(entry))
+  {
+    if (chroms_to_process.find(entry.chrom) == chroms_to_process.end()) continue;
+
+    auto full_range = entry.full_range();
+    if (!vcf.reset_bounds({entry.chrom, std::uint64_t(full_range.first), std::uint64_t(full_range.second)}, savvy::bounding_point::any))
+      return std::cerr << "Error: failed to query VCF index\n", EXIT_FAILURE;
+
+    while (vcf >> var)
+    {
+      geno.clear();
+      if (var.alts().size() == 0)
+        return std::cerr << "Error: alt allele in VCF record cannot be missing\n", EXIT_FAILURE;
+
+      for (std::size_t alt_idx = 1; alt_idx <= var.alts().size(); ++alt_idx)
+      {
+        if (overlap(var, alt_idx - 1, entry.cytosine_base()))
+        {
+          if (geno.size() == 0 && !var.get_format("GT", geno))
+            return std::cerr << "Error: missing FORMAT/GT\n", EXIT_FAILURE;
+
+          const std::size_t stride = geno.size() / n_samples;
+          for (auto it = geno.begin(); it != geno.end(); ++it)
+          {
+            if (*it == alt_idx)
+              mask[std::size_t(it.offset() / stride)] += 2;
+          }
+        }
+        else if (entry.type == 1 && overlap(var, alt_idx - 1, entry.extension_base()) &&
+                 !((var.ref() == "C" && var.alts()[alt_idx - 1] == "G") || (var.ref() == "G" && var.alts()[alt_idx - 1] == "C") || (var.ref() == "A" && var.alts()[alt_idx - 1] == "T") || (var.ref() == "T" && var.alts()[alt_idx - 1] == "A"))) // Checks if variant produces a color channel switch
+        {
+          if (geno.size() == 0 && !var.get_format("GT", geno))
+            return std::cerr << "Error: missing FORMAT/GT\n", EXIT_FAILURE;
+
+          const std::size_t stride = geno.size() / n_samples;
+          for (auto it = geno.begin(); it != geno.end(); ++it)
+          {
+            if (*it == alt_idx)
+              mask[std::size_t(it.offset() / stride)] += 2;
+          }
+        }
+        else if (overlap(var, alt_idx - 1, entry.binding_range()))
+        {
+          if (geno.size() == 0 && !var.get_format("GT", geno))
+            return std::cerr << "Error: missing FORMAT/GT\n", EXIT_FAILURE;
+
+          const std::size_t stride = geno.size() / n_samples;
+          const int het_weight = args.allow_hets() && stride > 1 ? 1 : 2;
+          for (auto it = geno.begin(); it != geno.end(); ++it)
+          {
+            if (*it == alt_idx)
+              mask[std::size_t(it.offset() / stride)] += het_weight;
+            else if (savvy::typed_value::is_end_of_vector(*it) && mask[std::size_t(it.offset() / stride)] == 1) // Do not allow hets for males on chrX
+              mask[std::size_t(it.offset() / stride)] = 2;
+          }
+        }
+      }
+    }
+
+    if (!write_mask_line(output_file, buffer, entry.probe_id, mask))
+      return std::cerr << "Error: file write error\n", EXIT_FAILURE;
+
+    std::fill(mask.begin(), mask.end(), 0);
+  }
+
+#else
   auto manifest = parse_epic_manifest(args.manifest_path());
   if (manifest.empty())
     return std::cerr << "Error: failed to parse EPIC array manifest\n", EXIT_FAILURE;
@@ -631,4 +918,5 @@ int main(int argc, char** argv)
   }
 
   return output_file.good() && !vcf.bad() ? EXIT_SUCCESS : EXIT_FAILURE;
+#endif
 }
