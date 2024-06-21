@@ -680,7 +680,6 @@ bool overlap(savvy::site_info& var, std::size_t alt_idx, const std::pair<std::in
 
 int main(int argc, char** argv)
 {
-
   using namespace xt;
   using namespace xt::linalg;
   xtensor<double, 1> y = {0.2, 0.8, 0.9, 0.85};
@@ -916,7 +915,6 @@ int main(int argc, char** argv)
     write_methy(methy.front(), output_file, args, cov_output.get());
     methy.pop_front();
   }
-
-  return output_file.good() && !vcf.bad() ? EXIT_SUCCESS : EXIT_FAILURE;
 #endif
+  return output_file.good() && !vcf.bad() ? EXIT_SUCCESS : EXIT_FAILURE;
 }
