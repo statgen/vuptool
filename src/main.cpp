@@ -460,16 +460,16 @@ public:
       if (type == 1)
       {
         if (is_reverse())
-          return cpg_beg_0 + 3;
-        else
           return cpg_beg_0;
+        else
+          return cpg_beg_0 + 3;
       }
       else
       {
         if (is_reverse())
-          return cpg_beg_0 + 2;
-        else
           return cpg_beg_0 + 1;
+        else
+          return cpg_beg_0 + 2;
       }
     }
 
@@ -478,16 +478,16 @@ public:
       if (type == 1)
       {
         if (is_reverse())
-          return cpg_beg_0 + 2;
-        else
           return cpg_beg_0 + 1;
+        else
+          return cpg_beg_0 + 2;
       }
       else
       {
         if (is_reverse())
-          return cpg_beg_0 + 2;
-        else
           return cpg_beg_0 + 1;
+        else
+          return cpg_beg_0 + 2;
       }
     }
 
@@ -495,16 +495,16 @@ public:
     {
       std::int64_t ext_base = extension_base();
       if (is_reverse())
-        return {ext_base - 50, ext_base - 1};
-      return {ext_base + 1, ext_base + 50};
+        return {ext_base + 1, ext_base + 50};
+      return {ext_base - 50, ext_base - 1};
     }
 
     std::pair<std::int64_t, std::int64_t> full_range() const
     {
       std::int64_t ext_base = extension_base();
       if (is_reverse())
-        return {ext_base - 50, ext_base};
-      return {ext_base, ext_base + 50};
+        return {ext_base, ext_base + 50};
+      return {ext_base - 50, ext_base};
     }
   };
 
